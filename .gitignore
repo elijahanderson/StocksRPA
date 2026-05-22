@@ -1,0 +1,3 @@
+# Ignore .idea and pycache
+.idea/
+__pycache__/

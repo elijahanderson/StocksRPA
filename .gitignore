@@ -1,3 +1,9 @@
 # Ignore .idea and pycache
 .idea/
 __pycache__/
+
+# ignore pyinstaller items
+build/
+dist/
+*.spec
+version_info.py

@@ -14,7 +14,18 @@ from PyQt6.QtWidgets import (
     QStatusBar,
 )
 
-__version__ = "0.1.0"
+def get_version():
+    """Reads the version from version.txt"""
+    try:
+        # Get the path to the directory where the script is located
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        version_file_path = os.path.join(base_path, 'version.txt')
+        with open(version_file_path, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "0.0.0"
+
+__version__ = get_version()
 
 
 class MainWindow(QMainWindow):

@@ -76,7 +76,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Ready. Please select a file.")
 
         self.timer = QTimer(self)
-        self.timer.setInterval(3000)
+        self.timer.setInterval(10000)
         self.timer.timeout.connect(self.check_job_status)
         logging.info("UI Initialized.")
 
@@ -101,8 +101,8 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
-            tickers = self._read_tickers_from_excel(file_path)
-            if not tickers:
+            stocks_tickers, mf_tickers = self._read_tickers_from_excel(file_path)
+            if not stocks_tickers and not mf_tickers:
                 self.status_bar.showMessage(
                     "No tickers found in the file. See app.log for details."
                 )
@@ -111,11 +111,18 @@ class MainWindow(QMainWindow):
                 return
 
             self.status_bar.showMessage(
-                f"Step 2/4: Found {len(tickers)} tickers. Submitting job to API..."
+                f"Step 2/4: Found {len(stocks_tickers)} stocks and {len(mf_tickers)} MFs. Submitting job..."
             )
+            
+            # --- Updated API Payload ---
+            payload = {
+                "stocks_tickers": stocks_tickers,
+                "mf_tickers": mf_tickers
+            }
+            
             url = f"{API_BASE_URL}/api/v1/stocks-rpa/submit-job"
             response = requests.post(
-                url, headers=self.api_headers, json={"tickers": tickers}
+                url, headers=self.api_headers, json=payload
             )
 
             if response.status_code == 401:
@@ -160,10 +167,14 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
 
                 file_path = self.file_path_box.text()
-                self._write_data_to_excel(file_path, data["result"])
+                
+                # --- Use the 'stocks_data' dictionary from the result ---
+                stocks_data = data["result"].get("stocks_data", {})
+                
+                self._write_data_to_excel(file_path, stocks_data)
 
                 self.status_bar.showMessage(
-                    f"Success! Wrote data for {len(data['result'])} tickers."
+                    f"Success! Wrote data for {len(stocks_data)} stock tickers."
                 )
                 self.current_job_id = None
                 self.run_button.setEnabled(True)
@@ -182,7 +193,7 @@ class MainWindow(QMainWindow):
             self.run_button.setEnabled(True)
 
     def _read_tickers_from_excel(self, file_path):
-        logging.info(f"Attempting to read tickers in bulk from: {file_path}")
+        logging.info(f"Attempting to read stock and MF tickers from: {file_path}")
         excel = None
         try:
             excel = win32com.client.DispatchEx("Excel.Application")
@@ -195,20 +206,51 @@ class MainWindow(QMainWindow):
             worksheet = workbook.Sheets("screener")
             logging.info("Accessed 'screener' worksheet.")
 
-            last_row = worksheet.Cells(worksheet.Rows.Count, 2).End(-4162).Row
-            logging.info(f"Found last row with data in column B at row: {last_row}")
+            # --- Find Header Columns ---
+            header_map = {str(worksheet.Cells(1, col).Value).strip().lower(): col for col in range(1, 50)}
+            ticker_col = header_map.get("ticker")
+            pe_col = header_map.get("p/e")
 
-            # --- Read the entire range in one operation ---
-            ticker_range = worksheet.Range(f"B2:B{last_row}")
-            data = ticker_range.Value
-            logging.info(f"Bulk read complete. Read {len(data)} rows.")
+            if not ticker_col:
+                raise Exception("Could not find 'Ticker' column in the 'screener' sheet.")
 
-            # Process the data in Python
-            tickers = [str(row[0]) for row in data if row[0] is not None]
+            # --- Read all data in one go ---
+            last_row = worksheet.Cells(worksheet.Rows.Count, ticker_col).End(-4162).Row
+            logging.info(f"Found last row with data in Ticker column at row: {last_row}")
+            
+            # Read the entire block of data, including potential blank rows
+            data_range = worksheet.Range(f"A2:Z{last_row}") # Read a wide range to get all columns
+            all_data = data_range.Value
+
+            stocks_tickers = []
+            mf_tickers = []
+            
+            is_stock_table = True # Assume we start in the stocks table
+            
+            for row_data in all_data:
+                ticker = row_data[ticker_col - 1]
+                pe_value = row_data[pe_col - 1] if pe_col else None
+
+                if ticker:
+                    if is_stock_table:
+                        # If we are in the stock table, a P/E value should exist
+                        if pe_value is not None:
+                            stocks_tickers.append(str(ticker))
+                        else:
+                            # If P/E is None, we've likely moved to the MF table
+                            is_stock_table = False
+                            mf_tickers.append(str(ticker))
+                    else:
+                        mf_tickers.append(str(ticker))
+                else:
+                    # A blank row in the ticker column signifies a break between tables
+                    if stocks_tickers and is_stock_table:
+                        is_stock_table = False
 
             workbook.Close(SaveChanges=False)
-            logging.info(f"Found {len(tickers)} tickers: {tickers}")
-            return tickers
+            logging.info(f"Found {len(stocks_tickers)} stock tickers: {stocks_tickers}")
+            logging.info(f"Found {len(mf_tickers)} MF tickers: {mf_tickers}")
+            return stocks_tickers, mf_tickers
         except Exception as e:
             logging.error(
                 f"An error occurred in _read_tickers_from_excel: {e}", exc_info=True
@@ -220,7 +262,7 @@ class MainWindow(QMainWindow):
             logging.info("Excel application quit.")
 
     def _write_data_to_excel(self, file_path, data):
-        logging.info(f"Attempting to write data in bulk to: {file_path}")
+        logging.info(f"Attempting to write P/E data to: {file_path}")
         excel = None
         try:
             excel = win32com.client.DispatchEx("Excel.Application")
@@ -233,29 +275,32 @@ class MainWindow(QMainWindow):
             worksheet = workbook.Sheets("screener")
             logging.info("Accessed 'screener' worksheet for writing.")
 
-            start_row = 80
+            header_map = {str(worksheet.Cells(1, col).Value).strip().lower(): col for col in range(1, 50)}
+            ticker_col = header_map.get("ticker")
+            pe_col = header_map.get("p/e")
+            logging.info(f"Header map created: {header_map}")
+            logging.info(f"Found columns: Ticker in col {ticker_col}, P/E in col {pe_col}")
 
-            data_to_write = [["Scraped Ticker", "Scraped Price"]]
-            for ticker, details in data.items():
-                price = details.get("price", "N/A")
-                data_to_write.append([ticker, price])
+            if not ticker_col or not pe_col:
+                raise Exception("Could not find 'Ticker' or 'P/E' columns in the 'screener' sheet.")
 
-            num_rows = len(data_to_write)
-            num_cols = len(data_to_write[0])
+            last_row = worksheet.Cells(worksheet.Rows.Count, ticker_col).End(-4162).Row
+            logging.info(f"Found last row for writing in Ticker column at row: {last_row}")
 
-            end_row = start_row + num_rows - 1
-            end_col = num_cols
-            target_range = worksheet.Range(
-                worksheet.Cells(start_row, 1), worksheet.Cells(end_row, end_col)
-            )
+            pe_data_to_write = []
+            for row in range(2, last_row + 1):
+                ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
+                if ticker_in_cell in data:
+                    pe_value = data[ticker_in_cell].get('P/E', 'N/A')
+                    pe_data_to_write.append([pe_value])
+                    logging.info(f"Row {row}: Found match for {ticker_in_cell}. Preparing to write P/E: {pe_value}")
+                else:
+                    pe_data_to_write.append([worksheet.Cells(row, pe_col).Value])
 
-            logging.info(
-                f"Preparing to write {num_rows}x{num_cols} block of data to range {target_range.Address}."
-            )
-
-            target_range.Value = data_to_write
-
-            logging.info("Bulk write operation complete.")
+            target_range = worksheet.Range(worksheet.Cells(2, pe_col), worksheet.Cells(last_row, pe_col))
+            logging.info(f"Preparing to write {len(pe_data_to_write)} values to P/E column range {target_range.Address}.")
+            target_range.Value = pe_data_to_write
+            logging.info("Bulk write of P/E column complete.")
 
             workbook.Save()
             logging.info("Workbook saved.")

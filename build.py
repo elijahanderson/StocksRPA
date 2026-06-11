@@ -27,7 +27,8 @@ pyinstaller_args = [
     "--name=StocksRPA",
     "--add-data=version.txt;.",
     "--version-file=version_info.py",
-    "--hidden-import=requests",  # Force PyInstaller to include the 'requests' library
+    "--hidden-import=requests",
+    "--hidden-import=win32timezone",  # Force PyInstaller to include the 'win32timezone' module
 ]
 
 # --- Step 4: Run PyInstaller ---

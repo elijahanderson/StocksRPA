@@ -3,6 +3,8 @@ import os
 import logging
 import requests
 import win32com.client
+import win32process
+import win32gui
 from contextlib import contextmanager
 from PyQt6.QtWidgets import (
     QApplication,
@@ -30,21 +32,52 @@ logging.basicConfig(
 
 @contextmanager
 def excel_manager():
-    """A context manager to ensure the Excel process is properly shut down."""
+    """A context manager to ensure the Excel process is properly shut down, even on error."""
     excel = None
+    pid = None
     try:
         excel = win32com.client.DispatchEx("Excel.Application")
         excel.Visible = False
-        logging.info("Excel application dispatched.")
+        excel.DisplayAlerts = False  # Suppress prompts like the save dialog
+        # Get the process ID to ensure termination
+        hwnd = excel.Hwnd
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        logging.info(f"Excel application dispatched with PID: {pid}.")
         yield excel
     finally:
         if excel:
-            excel.Quit()
-            # This is a more forceful way to release the COM object
-            from win32com.client import constants
+            # Wrap graceful quit in a try/except. If the COM object is corrupted
+            # by an upstream error, this will fail. We catch it and proceed to
+            # the forceful termination, which is the most important step.
+            try:
+                excel.Quit()
+                del excel
+                logging.info("Graceful Excel quit command sent.")
+            except Exception as e:
+                logging.warning(
+                    f"Failed to gracefully quit Excel (this is expected if an error occurred). Will now force terminate. Details: {e}"
+                )
 
-            del excel
-        logging.info("Excel application quit and released.")
+        if pid:
+            try:
+                # After attempting a graceful quit, forcefully terminate the process
+                # to prevent lingering instances, especially after errors.
+                kill_command = f"taskkill /F /PID {pid}"
+                # Redirect output to null to keep the console clean
+                result = os.system(f"{kill_command} > nul 2>&1")
+                if result == 0:
+                    logging.info(
+                        f"Successfully terminated lingering Excel process with PID: {pid}."
+                    )
+                else:
+                    # A non-zero return code usually means the process was already gone.
+                    logging.info(
+                        f"Excel process with PID {pid} was not found (likely already closed)."
+                    )
+            except Exception as e:
+                logging.error(
+                    f"An error occurred while trying to kill Excel process {pid}: {e}"
+                )
 
 
 def get_version():
@@ -216,16 +249,15 @@ class MainWindow(QMainWindow):
                 worksheet = workbook.Sheets("screener")
                 logging.info("Accessed 'screener' worksheet.")
 
-                last_row = worksheet.Cells(worksheet.Rows.Count, 2).End(-4162).Row
-                last_col = worksheet.Cells(1, worksheet.Columns.Count).End(-4161).Column
+                # --- Use UsedRange to correctly identify the block of data ---
+                all_data = worksheet.UsedRange.Value
                 logging.info(
-                    f"Found data boundaries: Last Row={last_row}, Last Col={last_col}"
+                    f"Bulk read complete using UsedRange. Read {len(all_data)} rows."
                 )
 
-                all_data = worksheet.Range(
-                    worksheet.Cells(1, 1), worksheet.Cells(last_row, last_col)
-                ).Value
-                logging.info(f"Bulk read complete. Read {len(all_data)} rows.")
+                if not all_data:
+                    logging.warning("UsedRange returned no data.")
+                    return [], []
 
                 stocks_tickers = []
                 mf_tickers = []
@@ -233,6 +265,12 @@ class MainWindow(QMainWindow):
 
                 for i, row_data in enumerate(all_data):
                     is_header = False
+                    # Skip rows that are completely empty or contain only whitespace.
+                    if not row_data or all(
+                        c is None or str(c).strip() == "" for c in row_data
+                    ):
+                        continue
+
                     for cell in row_data:
                         cell_str = str(cell).strip().lower()
                         if cell_str.startswith("p/e"):
@@ -251,6 +289,9 @@ class MainWindow(QMainWindow):
                             break
 
                     if is_header:
+                        continue
+
+                    if len(row_data) < 2:
                         continue
 
                     ticker = row_data[1]
@@ -281,70 +322,57 @@ class MainWindow(QMainWindow):
                 worksheet = workbook.Sheets("screener")
                 logging.info("Accessed 'screener' worksheet for writing.")
 
-                # --- More Robust Header Search ---
-                # Find the last column in the header row (row 1)
-                last_col = (
-                    worksheet.Cells(1, worksheet.Columns.Count).End(-4159).Column
-                )  # -4159 is xlToLeft
-                logging.info(f"Scanning headers in {last_col} columns.")
-
-                header_map = {}
-                for col in range(1, last_col + 1):
-                    cell_value = worksheet.Cells(1, col).Value
-                    if cell_value:
-                        header_map[str(cell_value).strip().lower()] = col
-
-                ticker_col = 2  # Ticker is always in column B
+                # --- Robustly find header row and P/E column ---
+                header_row_num = None
                 pe_col = None
-                for header, col_num in header_map.items():
-                    if header.startswith("p/e"):
-                        pe_col = col_num
-                        break
+                ticker_col = 2  # Ticker column is always column 2 (B)
 
-                logging.info(f"Header map created: {header_map}")
-                logging.info(
-                    f"Found columns: Ticker in col {ticker_col}, P/E in col {pe_col}"
-                )
-
-                if not pe_col:
+                try:
+                    # Find the cell containing the P/E header to identify the correct row and column
+                    pe_header_cell = worksheet.UsedRange.Find("P/E", LookAt=2)
+                    if pe_header_cell is None:
+                        raise Exception("P/E header not found")
+                    header_row_num = pe_header_cell.Row
+                    pe_col = pe_header_cell.Column
+                except Exception:
                     raise Exception(
                         "Could not find a column starting with 'P/E' in the 'screener' sheet."
                     )
 
+                logging.info(
+                    f"Found headers in row {header_row_num}: Ticker in col {ticker_col}, P/E in col {pe_col}"
+                )
+
                 # --- Find Table Range ---
-                # Find the last row of the first table by looking for the first blank row in the Ticker column
+                first_data_row = header_row_num + 1
                 last_stock_row = 0
-                for row in range(2, worksheet.Rows.Count):
+                for row in range(first_data_row, worksheet.Rows.Count):
                     if not worksheet.Cells(row, ticker_col).Value:
                         last_stock_row = row - 1
                         break
-                if (
-                    last_stock_row == 0
-                ):  # If no blank row is found, use the last row with data
+                if last_stock_row == 0:
                     last_stock_row = (
                         worksheet.Cells(worksheet.Rows.Count, ticker_col).End(-4162).Row
                     )
 
-                logging.info(f"Found last row of stock table at row: {last_stock_row}")
+                logging.info(
+                    f"Stock table range identified: Rows {first_data_row} to {last_stock_row}"
+                )
 
                 # --- Prepare data for bulk write ---
-                # Create a list of lists representing the P/E column data
                 pe_data_to_write = []
-                for row in range(2, last_stock_row + 1):
+                for row in range(first_data_row, last_stock_row + 1):
                     ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
                     if ticker_in_cell in data:
                         pe_value = data[ticker_in_cell].get("P/E", "N/A")
                         pe_data_to_write.append([pe_value])
-                        logging.info(
-                            f"Row {row}: Found match for {ticker_in_cell}. Preparing to write P/E: {pe_value}"
-                        )
                     else:
-                        # Append existing value to not overwrite it
                         pe_data_to_write.append([worksheet.Cells(row, pe_col).Value])
 
                 # --- Write the P/E column data in one operation ---
                 target_range = worksheet.Range(
-                    worksheet.Cells(2, pe_col), worksheet.Cells(last_stock_row, pe_col)
+                    worksheet.Cells(first_data_row, pe_col),
+                    worksheet.Cells(last_stock_row, pe_col),
                 )
                 logging.info(
                     f"Preparing to write {len(pe_data_to_write)} values to P/E column range {target_range.Address}."

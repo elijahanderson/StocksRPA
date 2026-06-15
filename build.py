@@ -21,12 +21,14 @@ create_versionfile(
 
 # --- Step 3: Define the PyInstaller arguments ---
 pyinstaller_args = [
-    'main.py',
-    '--onefile',
-    '--windowed',
-    '--name=StocksRPA',
-    '--add-data=version.txt;.',
-    '--version-file=version_info.py',
+    "main.py",
+    "--onefile",
+    "--windowed",
+    "--name=StocksRPA",
+    "--add-data=version.txt;.",
+    "--version-file=version_info.py",
+    "--hidden-import=requests",
+    "--hidden-import=win32timezone",  # Force PyInstaller to include the 'win32timezone' module
 ]
 
 # --- Step 4: Run PyInstaller ---

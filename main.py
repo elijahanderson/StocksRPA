@@ -30,6 +30,12 @@ logging.basicConfig(
 )
 
 
+class ExcelReadError(Exception):
+    """Custom exception for recoverable Excel read errors."""
+
+    pass
+
+
 @contextmanager
 def excel_manager():
     """A context manager to ensure the Excel process is properly shut down, even on error."""
@@ -184,6 +190,11 @@ class MainWindow(QMainWindow):
             logging.info(f"Job submitted successfully. Job ID: {self.current_job_id}")
             self.timer.start()
 
+        except ExcelReadError as e:
+            self.status_bar.showMessage(str(e))
+            logging.error(f"A recoverable Excel error occurred: {e}", exc_info=False)
+            self.run_button.setEnabled(True)
+
         except Exception as e:
             self.status_bar.showMessage(f"An error occurred. See app.log for details.")
             logging.error(
@@ -249,14 +260,19 @@ class MainWindow(QMainWindow):
                 worksheet = workbook.Sheets("screener")
                 logging.info("Accessed 'screener' worksheet.")
 
-                # --- Use UsedRange to correctly identify the block of data ---
-                all_data = worksheet.UsedRange.Value
+                used_range = worksheet.UsedRange
+                if used_range is None:
+                    raise ExcelReadError(
+                        "Failed to read Excel file due to a temporary issue. Please re-run the process."
+                    )
+
+                all_data = used_range.Value
                 logging.info(
                     f"Bulk read complete using UsedRange. Read {len(all_data)} rows."
                 )
 
                 if not all_data:
-                    logging.warning("UsedRange returned no data.")
+                    logging.warning("UsedRange returned no data, or sheet is empty.")
                     return [], []
 
                 stocks_tickers = []
@@ -265,7 +281,6 @@ class MainWindow(QMainWindow):
 
                 for i, row_data in enumerate(all_data):
                     is_header = False
-                    # Skip rows that are completely empty or contain only whitespace.
                     if not row_data or all(
                         c is None or str(c).strip() == "" for c in row_data
                     ):
@@ -301,7 +316,6 @@ class MainWindow(QMainWindow):
                         elif current_table == "mf":
                             mf_tickers.append(str(ticker))
 
-                workbook.Close(SaveChanges=False)
                 logging.info(
                     f"Found {len(stocks_tickers)} stock tickers: {stocks_tickers}"
                 )
@@ -322,13 +336,11 @@ class MainWindow(QMainWindow):
                 worksheet = workbook.Sheets("screener")
                 logging.info("Accessed 'screener' worksheet for writing.")
 
-                # --- Robustly find header row and P/E column ---
                 header_row_num = None
                 pe_col = None
-                ticker_col = 2  # Ticker column is always column 2 (B)
+                ticker_col = 2
 
                 try:
-                    # Find the cell containing the P/E header to identify the correct row and column
                     pe_header_cell = worksheet.UsedRange.Find("P/E", LookAt=2)
                     if pe_header_cell is None:
                         raise Exception("P/E header not found")
@@ -343,7 +355,6 @@ class MainWindow(QMainWindow):
                     f"Found headers in row {header_row_num}: Ticker in col {ticker_col}, P/E in col {pe_col}"
                 )
 
-                # --- Find Table Range ---
                 first_data_row = header_row_num + 1
                 last_stock_row = 0
                 for row in range(first_data_row, worksheet.Rows.Count):
@@ -359,7 +370,6 @@ class MainWindow(QMainWindow):
                     f"Stock table range identified: Rows {first_data_row} to {last_stock_row}"
                 )
 
-                # --- Prepare data for bulk write ---
                 pe_data_to_write = []
                 for row in range(first_data_row, last_stock_row + 1):
                     ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
@@ -369,7 +379,6 @@ class MainWindow(QMainWindow):
                     else:
                         pe_data_to_write.append([worksheet.Cells(row, pe_col).Value])
 
-                # --- Write the P/E column data in one operation ---
                 target_range = worksheet.Range(
                     worksheet.Cells(first_data_row, pe_col),
                     worksheet.Cells(last_stock_row, pe_col),
@@ -382,7 +391,7 @@ class MainWindow(QMainWindow):
 
                 workbook.Save()
                 logging.info("Workbook saved.")
-                workbook.Close(SaveChanges=True)
+
             except Exception as e:
                 logging.error(
                     f"An error occurred in _write_data_to_excel: {e}", exc_info=True

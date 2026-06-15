@@ -226,13 +226,16 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
 
                 file_path = self.file_path_box.text()
-
                 stocks_data = data["result"].get("stocks_data", {})
+                mf_data = data["result"].get("mf_data", {})
 
-                self._write_data_to_excel(file_path, stocks_data)
+                if stocks_data:
+                    self._write_stocks_data_to_excel(file_path, stocks_data)
+                if mf_data:
+                    self._write_mf_data_to_excel(file_path, mf_data)
 
                 self.status_bar.showMessage(
-                    f"Success! Wrote data for {len(stocks_data)} stock tickers."
+                    f"Success! Wrote data for {len(stocks_data)} stocks and {len(mf_data)} MFs."
                 )
                 self.current_job_id = None
                 self.run_button.setEnabled(True)
@@ -328,7 +331,7 @@ class MainWindow(QMainWindow):
                 )
                 raise
 
-    def _write_data_to_excel(self, file_path, data):
+    def _write_stocks_data_to_excel(self, file_path, data):
         logging.info(f"Attempting to write P/E data to: {file_path}")
         with excel_manager() as excel:
             try:
@@ -352,7 +355,7 @@ class MainWindow(QMainWindow):
                     )
 
                 logging.info(
-                    f"Found headers in row {header_row_num}: Ticker in col {ticker_col}, P/E in col {pe_col}"
+                    f"Found P/E headers in row {header_row_num}: Ticker in col {ticker_col}, P/E in col {pe_col}"
                 )
 
                 first_data_row = header_row_num + 1
@@ -394,7 +397,80 @@ class MainWindow(QMainWindow):
 
             except Exception as e:
                 logging.error(
-                    f"An error occurred in _write_data_to_excel: {e}", exc_info=True
+                    f"An error occurred in _write_stocks_data_to_excel: {e}",
+                    exc_info=True,
+                )
+                raise
+
+    def _write_mf_data_to_excel(self, file_path, data):
+        logging.info(f"Attempting to write Fund Size data to: {file_path}")
+        with excel_manager() as excel:
+            try:
+                workbook = excel.Workbooks.Open(file_path)
+                worksheet = workbook.Sheets("screener")
+                logging.info("Accessed 'screener' worksheet for MF writing.")
+
+                header_row_num = None
+                fund_size_col = None
+                ticker_col = 2
+
+                try:
+                    # Find the MF table by looking for its unique header
+                    mf_header_cell = worksheet.UsedRange.Find("Expense Ratio", LookAt=2)
+                    if mf_header_cell is None:
+                        raise Exception("MF 'Expense Ratio' header not found")
+                    header_row_num = mf_header_cell.Row
+
+                    # Now find the 'Fund Size' column within that header row
+                    header_range = worksheet.Rows(header_row_num)
+                    fund_size_cell = header_range.Find("Fund Size", LookAt=2)
+                    if fund_size_cell is None:
+                        raise Exception("'Fund Size' header not found in MF table")
+                    fund_size_col = fund_size_cell.Column
+
+                except Exception as e:
+                    raise Exception(f"Could not find MF headers: {e}")
+
+                logging.info(
+                    f"Found MF headers in row {header_row_num}: Ticker in col {ticker_col}, Fund Size in col {fund_size_col}"
+                )
+
+                first_data_row = header_row_num + 1
+                last_mf_row = (
+                    worksheet.Cells(worksheet.Rows.Count, ticker_col).End(-4162).Row
+                )
+
+                logging.info(
+                    f"MF table range identified: Rows {first_data_row} to {last_mf_row}"
+                )
+
+                fund_size_data_to_write = []
+                for row in range(first_data_row, last_mf_row + 1):
+                    ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
+                    if ticker_in_cell in data:
+                        fund_size_value = data[ticker_in_cell].get("Fund Size", "N/A")
+                        fund_size_data_to_write.append([fund_size_value])
+                    else:
+                        fund_size_data_to_write.append(
+                            [worksheet.Cells(row, fund_size_col).Value]
+                        )
+
+                target_range = worksheet.Range(
+                    worksheet.Cells(first_data_row, fund_size_col),
+                    worksheet.Cells(last_mf_row, fund_size_col),
+                )
+                logging.info(
+                    f"Preparing to write {len(fund_size_data_to_write)} values to Fund Size column range {target_range.Address}."
+                )
+                target_range.Value = fund_size_data_to_write
+                logging.info("Bulk write of Fund Size column complete.")
+
+                workbook.Save()
+                logging.info("Workbook saved.")
+
+            except Exception as e:
+                logging.error(
+                    f"An error occurred in _write_mf_data_to_excel: {e}", exc_info=True
                 )
                 raise
 

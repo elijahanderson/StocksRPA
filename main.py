@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import requests
+import time
 import win32com.client
 import win32process
 import win32gui
@@ -226,13 +227,13 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
 
                 file_path = self.file_path_box.text()
-
                 stocks_data = data["result"].get("stocks_data", {})
+                mf_data = data["result"].get("mf_data", {})
 
-                self._write_data_to_excel(file_path, stocks_data)
+                self._write_data_to_excel(file_path, stocks_data, mf_data)
 
                 self.status_bar.showMessage(
-                    f"Success! Wrote data for {len(stocks_data)} stock tickers."
+                    f"Success! Wrote data for {len(stocks_data)} stocks and {len(mf_data)} MFs."
                 )
                 self.current_job_id = None
                 self.run_button.setEnabled(True)
@@ -328,66 +329,120 @@ class MainWindow(QMainWindow):
                 )
                 raise
 
-    def _write_data_to_excel(self, file_path, data):
-        logging.info(f"Attempting to write P/E data to: {file_path}")
+    def _write_data_to_excel(self, file_path, stocks_data, mf_data):
+        logging.info(f"Opening Excel to write all data.")
         with excel_manager() as excel:
             try:
                 workbook = excel.Workbooks.Open(file_path)
                 worksheet = workbook.Sheets("screener")
                 logging.info("Accessed 'screener' worksheet for writing.")
+                time.sleep(1)  # Allow Excel to initialize fully
 
-                header_row_num = None
-                pe_col = None
-                ticker_col = 2
+                # --- Write Stocks Data ---
+                if stocks_data:
+                    logging.info("Starting to write stocks data (P/E).")
+                    try:
+                        used_range = worksheet.UsedRange
+                        if used_range is None:
+                            raise ExcelReadError("Failed to access worksheet data.")
 
-                try:
-                    pe_header_cell = worksheet.UsedRange.Find("P/E", LookAt=2)
-                    if pe_header_cell is None:
-                        raise Exception("P/E header not found")
-                    header_row_num = pe_header_cell.Row
-                    pe_col = pe_header_cell.Column
-                except Exception:
-                    raise Exception(
-                        "Could not find a column starting with 'P/E' in the 'screener' sheet."
-                    )
+                        pe_header_cell = used_range.Find("P/E", LookAt=2)
+                        if pe_header_cell is None:
+                            raise Exception("P/E header not found")
+                        header_row_num = pe_header_cell.Row
+                        pe_col = pe_header_cell.Column
+                        ticker_col = 2
 
-                logging.info(
-                    f"Found headers in row {header_row_num}: Ticker in col {ticker_col}, P/E in col {pe_col}"
-                )
+                        first_data_row = header_row_num + 1
 
-                first_data_row = header_row_num + 1
-                last_stock_row = 0
-                for row in range(first_data_row, worksheet.Rows.Count):
-                    if not worksheet.Cells(row, ticker_col).Value:
-                        last_stock_row = row - 1
-                        break
-                if last_stock_row == 0:
-                    last_stock_row = (
-                        worksheet.Cells(worksheet.Rows.Count, ticker_col).End(-4162).Row
-                    )
+                        # Efficiently find the end of the stock table
+                        last_row_of_sheet = used_range.Row + used_range.Rows.Count - 1
+                        ticker_col_data = worksheet.Range(
+                            worksheet.Cells(first_data_row, ticker_col),
+                            worksheet.Cells(last_row_of_sheet, ticker_col),
+                        ).Value
 
-                logging.info(
-                    f"Stock table range identified: Rows {first_data_row} to {last_stock_row}"
-                )
+                        last_stock_row = last_row_of_sheet
+                        if ticker_col_data:
+                            for i, cell in enumerate(ticker_col_data):
+                                if cell[0] is None:
+                                    last_stock_row = first_data_row + i - 1
+                                    break
 
-                pe_data_to_write = []
-                for row in range(first_data_row, last_stock_row + 1):
-                    ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
-                    if ticker_in_cell in data:
-                        pe_value = data[ticker_in_cell].get("P/E", "N/A")
-                        pe_data_to_write.append([pe_value])
-                    else:
-                        pe_data_to_write.append([worksheet.Cells(row, pe_col).Value])
+                        logging.info(
+                            f"Stock table range identified: Rows {first_data_row} to {last_stock_row}"
+                        )
 
-                target_range = worksheet.Range(
-                    worksheet.Cells(first_data_row, pe_col),
-                    worksheet.Cells(last_stock_row, pe_col),
-                )
-                logging.info(
-                    f"Preparing to write {len(pe_data_to_write)} values to P/E column range {target_range.Address}."
-                )
-                target_range.Value = pe_data_to_write
-                logging.info("Bulk write of P/E column complete.")
+                        pe_data_to_write = []
+                        for row in range(first_data_row, last_stock_row + 1):
+                            ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
+                            if ticker_in_cell in stocks_data:
+                                pe_value = stocks_data[ticker_in_cell].get("P/E", "N/A")
+                                pe_data_to_write.append([pe_value])
+                            else:
+                                pe_data_to_write.append(
+                                    [worksheet.Cells(row, pe_col).Value]
+                                )
+
+                        target_range = worksheet.Range(
+                            worksheet.Cells(first_data_row, pe_col),
+                            worksheet.Cells(last_stock_row, pe_col),
+                        )
+                        target_range.Value = pe_data_to_write
+                        logging.info("Bulk write of P/E column complete.")
+                    except Exception as e:
+                        logging.error(
+                            f"Could not write stocks data: {e}", exc_info=True
+                        )
+
+                # --- Write MF Data ---
+                if mf_data:
+                    logging.info("Starting to write MF data (Fund Size).")
+                    try:
+                        used_range = worksheet.UsedRange
+                        if used_range is None:
+                            raise ExcelReadError("Failed to access worksheet data.")
+
+                        mf_header_cell = used_range.Find("Expense Ratio", LookAt=2)
+                        if mf_header_cell is None:
+                            raise Exception("MF 'Expense Ratio' header not found")
+                        header_row_num = mf_header_cell.Row
+                        ticker_col = 2
+
+                        header_range = worksheet.Rows(header_row_num)
+                        fund_size_cell = header_range.Find("Fund Size", LookAt=2)
+                        if fund_size_cell is None:
+                            raise Exception("'Fund Size' header not found")
+                        fund_size_col = fund_size_cell.Column
+
+                        first_data_row = header_row_num + 1
+                        last_mf_row = used_range.Row + used_range.Rows.Count - 1
+
+                        logging.info(
+                            f"MF table range identified: Rows {first_data_row} to {last_mf_row}"
+                        )
+
+                        fund_size_data_to_write = []
+                        for row in range(first_data_row, last_mf_row + 1):
+                            ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
+                            if ticker_in_cell in mf_data:
+                                fund_size_value = mf_data[ticker_in_cell].get(
+                                    "Fund Size", "N/A"
+                                )
+                                fund_size_data_to_write.append([fund_size_value])
+                            else:
+                                fund_size_data_to_write.append(
+                                    [worksheet.Cells(row, fund_size_col).Value]
+                                )
+
+                        target_range = worksheet.Range(
+                            worksheet.Cells(first_data_row, fund_size_col),
+                            worksheet.Cells(last_mf_row, fund_size_col),
+                        )
+                        target_range.Value = fund_size_data_to_write
+                        logging.info("Bulk write of Fund Size column complete.")
+                    except Exception as e:
+                        logging.error(f"Could not write MF data: {e}", exc_info=True)
 
                 workbook.Save()
                 logging.info("Workbook saved.")

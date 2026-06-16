@@ -340,22 +340,37 @@ class MainWindow(QMainWindow):
 
                 # --- Write Stocks Data ---
                 if stocks_data:
-                    logging.info("Starting to write stocks data (P/E).")
+                    logging.info("Starting to write stocks data.")
+
+                    stocks_header_map = {
+                        "ROIC": "ROIC",
+                        "D/E": "D/E",
+                        "ROE": "ROE",
+                        "P/E": "P/E",
+                        "FCF": "FCF",
+                        "P/B": "P/B",
+                        "EPS": "EPS",
+                        "Net PM": "Net PM",
+                        "PEG": "PEG",
+                        "Rev Growth": "Rev",
+                        "Curr Ratio": "Curr Ratio",
+                        "Div Yield": "Div Yield",
+                    }
+
                     try:
                         used_range = worksheet.UsedRange
                         if used_range is None:
                             raise ExcelReadError("Failed to access worksheet data.")
 
+                        # Find the header row using P/E as an anchor
                         pe_header_cell = used_range.Find("P/E", LookAt=2)
                         if pe_header_cell is None:
                             raise Exception("P/E header not found")
                         header_row_num = pe_header_cell.Row
-                        pe_col = pe_header_cell.Column
                         ticker_col = 2
 
+                        # Find the end of the stocks table
                         first_data_row = header_row_num + 1
-
-                        # Efficiently find the end of the stock table
                         last_row_of_sheet = used_range.Row + used_range.Rows.Count - 1
                         ticker_col_data = worksheet.Range(
                             worksheet.Cells(first_data_row, ticker_col),
@@ -373,23 +388,51 @@ class MainWindow(QMainWindow):
                             f"Stock table range identified: Rows {first_data_row} to {last_stock_row}"
                         )
 
-                        pe_data_to_write = []
-                        for row in range(first_data_row, last_stock_row + 1):
-                            ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
-                            if ticker_in_cell in stocks_data:
-                                pe_value = stocks_data[ticker_in_cell].get("P/E", "N/A")
-                                pe_data_to_write.append([pe_value])
-                            else:
-                                pe_data_to_write.append(
-                                    [worksheet.Cells(row, pe_col).Value]
+                        # Process each column
+                        for api_key, search_term in stocks_header_map.items():
+                            try:
+                                col_header_cell = used_range.Find(search_term, LookAt=2)
+                                if col_header_cell is None:
+                                    logging.warning(
+                                        f"Column for '{search_term}' not found. Skipping."
+                                    )
+                                    continue
+
+                                col_num = col_header_cell.Column
+                                logging.info(
+                                    f"Processing column: {api_key} (found in col {col_num})"
                                 )
 
-                        target_range = worksheet.Range(
-                            worksheet.Cells(first_data_row, pe_col),
-                            worksheet.Cells(last_stock_row, pe_col),
-                        )
-                        target_range.Value = pe_data_to_write
-                        logging.info("Bulk write of P/E column complete.")
+                                data_to_write = []
+                                for row in range(first_data_row, last_stock_row + 1):
+                                    ticker_in_cell = str(
+                                        worksheet.Cells(row, ticker_col).Value
+                                    )
+                                    if (
+                                        ticker_in_cell in stocks_data
+                                        and api_key in stocks_data[ticker_in_cell]
+                                    ):
+                                        new_value = stocks_data[ticker_in_cell][api_key]
+                                        data_to_write.append([new_value])
+                                    else:
+                                        data_to_write.append(
+                                            [worksheet.Cells(row, col_num).Value]
+                                        )
+
+                                target_range = worksheet.Range(
+                                    worksheet.Cells(first_data_row, col_num),
+                                    worksheet.Cells(last_stock_row, col_num),
+                                )
+                                target_range.Value = data_to_write
+                                logging.info(
+                                    f"Bulk write for {api_key} column complete."
+                                )
+
+                            except Exception as e:
+                                logging.error(
+                                    f"Could not write column for {api_key}: {e}"
+                                )
+
                     except Exception as e:
                         logging.error(
                             f"Could not write stocks data: {e}", exc_info=True
@@ -417,10 +460,6 @@ class MainWindow(QMainWindow):
 
                         first_data_row = header_row_num + 1
                         last_mf_row = used_range.Row + used_range.Rows.Count - 1
-
-                        logging.info(
-                            f"MF table range identified: Rows {first_data_row} to {last_mf_row}"
-                        )
 
                         fund_size_data_to_write = []
                         for row in range(first_data_row, last_mf_row + 1):

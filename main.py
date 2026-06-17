@@ -446,7 +446,21 @@ class MainWindow(QMainWindow):
 
                 # --- Write MF Data ---
                 if mf_data:
-                    logging.info("Starting to write MF data (Fund Size).")
+                    logging.info("Starting to write MF data.")
+
+                    mf_header_map = {
+                        "Expense Ratio": "Expense",
+                        "Tracking Error": "Tracking",
+                        "Fund Size": "Fund Size",
+                        "Turnover Ratio": "Turnover",
+                        "Premium/Discount": "Premium",
+                        "12-month yield": "12-month",
+                        "3 yr perf": "3 yr",
+                        "5 yr perf": "5 yr",
+                        "Sharpe": "Sharpe",
+                        "Beta": "Beta",
+                    }
+
                     try:
                         used_range = worksheet.UsedRange
                         if used_range is None:
@@ -458,38 +472,60 @@ class MainWindow(QMainWindow):
                         header_row_num = mf_header_cell.Row
                         ticker_col = 2
 
-                        # Define the header row search area, ignoring columns A-I
                         header_search_range = worksheet.Range(
                             worksheet.Cells(header_row_num, 10),
                             worksheet.Cells(header_row_num, 255),
                         )
-                        fund_size_cell = header_search_range.Find("Fund Size", LookAt=2)
-                        if fund_size_cell is None:
-                            raise Exception("'Fund Size' header not found")
-                        fund_size_col = fund_size_cell.Column
 
                         first_data_row = header_row_num + 1
                         last_mf_row = used_range.Row + used_range.Rows.Count - 1
 
-                        fund_size_data_to_write = []
-                        for row in range(first_data_row, last_mf_row + 1):
-                            ticker_in_cell = str(worksheet.Cells(row, ticker_col).Value)
-                            if ticker_in_cell in mf_data:
-                                fund_size_value = mf_data[ticker_in_cell].get(
-                                    "Fund Size", "N/A"
+                        for api_key, search_term in mf_header_map.items():
+                            try:
+                                col_header_cell = header_search_range.Find(
+                                    search_term, LookAt=2
                                 )
-                                fund_size_data_to_write.append([fund_size_value])
-                            else:
-                                fund_size_data_to_write.append(
-                                    [worksheet.Cells(row, fund_size_col).Value]
+                                if col_header_cell is None:
+                                    logging.warning(
+                                        f"Column for '{search_term}' not found in header row. Skipping."
+                                    )
+                                    continue
+
+                                col_num = col_header_cell.Column
+                                logging.info(
+                                    f"Processing MF column: {api_key} (found in col {col_num})"
                                 )
 
-                        target_range = worksheet.Range(
-                            worksheet.Cells(first_data_row, fund_size_col),
-                            worksheet.Cells(last_mf_row, fund_size_col),
-                        )
-                        target_range.Value = fund_size_data_to_write
-                        logging.info("Bulk write of Fund Size column complete.")
+                                data_to_write = []
+                                for row in range(first_data_row, last_mf_row + 1):
+                                    ticker_in_cell = str(
+                                        worksheet.Cells(row, ticker_col).Value
+                                    )
+                                    if (
+                                        ticker_in_cell in mf_data
+                                        and api_key in mf_data[ticker_in_cell]
+                                    ):
+                                        new_value = mf_data[ticker_in_cell][api_key]
+                                        data_to_write.append([new_value])
+                                    else:
+                                        data_to_write.append(
+                                            [worksheet.Cells(row, col_num).Value]
+                                        )
+
+                                target_range = worksheet.Range(
+                                    worksheet.Cells(first_data_row, col_num),
+                                    worksheet.Cells(last_mf_row, col_num),
+                                )
+                                target_range.Value = data_to_write
+                                logging.info(
+                                    f"Bulk write for MF {api_key} column complete."
+                                )
+
+                            except Exception as e:
+                                logging.error(
+                                    f"Could not write column for MF {api_key}: {e}"
+                                )
+
                     except Exception as e:
                         logging.error(f"Could not write MF data: {e}", exc_info=True)
 

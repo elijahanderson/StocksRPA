@@ -350,11 +350,11 @@ class MainWindow(QMainWindow):
                         "FCF": "FCF",
                         "P/B": "P/B",
                         "EPS": "EPS",
-                        "Net PM": "Net PM",
+                        "Net PM": "Net",
                         "PEG": "PEG",
                         "Rev Growth": "Rev",
-                        "Curr Ratio": "Curr Ratio",
-                        "Div Yield": "Div Yield",
+                        "Curr Ratio": "Curr",
+                        "Div Yield": "Div",
                     }
 
                     try:
@@ -362,14 +362,18 @@ class MainWindow(QMainWindow):
                         if used_range is None:
                             raise ExcelReadError("Failed to access worksheet data.")
 
-                        # Find the header row using P/E as an anchor
                         pe_header_cell = used_range.Find("P/E", LookAt=2)
                         if pe_header_cell is None:
                             raise Exception("P/E header not found")
                         header_row_num = pe_header_cell.Row
                         ticker_col = 2
 
-                        # Find the end of the stocks table
+                        # Define the header row search area, ignoring columns A-I
+                        header_search_range = worksheet.Range(
+                            worksheet.Cells(header_row_num, 10),
+                            worksheet.Cells(header_row_num, 255),
+                        )
+
                         first_data_row = header_row_num + 1
                         last_row_of_sheet = used_range.Row + used_range.Rows.Count - 1
                         ticker_col_data = worksheet.Range(
@@ -388,13 +392,15 @@ class MainWindow(QMainWindow):
                             f"Stock table range identified: Rows {first_data_row} to {last_stock_row}"
                         )
 
-                        # Process each column
                         for api_key, search_term in stocks_header_map.items():
                             try:
-                                col_header_cell = used_range.Find(search_term, LookAt=2)
+                                # Search for each header only within the correct header row
+                                col_header_cell = header_search_range.Find(
+                                    search_term, LookAt=2
+                                )
                                 if col_header_cell is None:
                                     logging.warning(
-                                        f"Column for '{search_term}' not found. Skipping."
+                                        f"Column for '{search_term}' not found in header row. Skipping."
                                     )
                                     continue
 
@@ -452,8 +458,12 @@ class MainWindow(QMainWindow):
                         header_row_num = mf_header_cell.Row
                         ticker_col = 2
 
-                        header_range = worksheet.Rows(header_row_num)
-                        fund_size_cell = header_range.Find("Fund Size", LookAt=2)
+                        # Define the header row search area, ignoring columns A-I
+                        header_search_range = worksheet.Range(
+                            worksheet.Cells(header_row_num, 10),
+                            worksheet.Cells(header_row_num, 255),
+                        )
+                        fund_size_cell = header_search_range.Find("Fund Size", LookAt=2)
                         if fund_size_cell is None:
                             raise Exception("'Fund Size' header not found")
                         fund_size_col = fund_size_cell.Column

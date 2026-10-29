@@ -109,7 +109,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Stock Data Scraper")
         self.setGeometry(100, 100, 500, 150)
         self.current_job_id = None
-        self.api_headers = {"X-API-KEY": API_KEY}
+        self.api_headers = {
+            "X-API-KEY": API_KEY,
+            "User-Agent": f"StocksRPA/{__version__}",
+        }
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
